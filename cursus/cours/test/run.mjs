@@ -9,10 +9,9 @@ import { fileStorage } from '../lib/storage-file.mjs';
 let passed = 0;
 const t = async (name, fn) => { try { await fn(); passed++; console.log('  ok  ' + name); } catch (e) { console.error('  ECHEC ' + name + '\n', e); process.exitCode = 1; } };
 
-/* ----- IA simulée (Groq + Gemini) ----- */
-const calls = { groqStt: [], gemini: [], groqChat: 0 };
+/* ----- IA simulée (Groq) ----- */
+const calls = { groqStt: [], groqChat: 0 };
 let quotaOnKey = null;       // clé Groq qui répond 429
-let geminiDown = false;      // Gemini répond 429 « par jour »
 function fakeFetch(url, init) {
   const u = String(url);
   const hdr = init.headers || {};
@@ -28,26 +27,24 @@ function fakeFetch(url, init) {
       { text: ' Elle a lieu dans les chloroplastes, grâce à la chlorophylle, et produit du glucose et du dioxygène.', avg_logprob: -0.25, no_speech_prob: 0.02, compression_ratio: 1.5 },
     ] });
   }
-  if (u.includes('generativelanguage.googleapis.com')) {
-    calls.gemini.push(u);
-    if (geminiDown) return resp(429, { error: { message: 'Quota exceeded for metric ... PerDay', details: [] } });
+  if (u.includes('api.groq.com/openai/v1/chat/completions')) {
+    calls.groqChat++;
     const body = JSON.parse(init.body);
-    if (!body.systemInstruction) return resp(200, { candidates: [{ content: { parts: [{ text: 'Transcription de secours par Gemini : la photosynthèse a lieu dans les chloroplastes.' }] } }] });
-    const sys = body.systemInstruction.parts[0].text;
+    const sys = body.messages[0].content;
+    const reply = (text) => resp(200, { choices: [{ message: { role: 'assistant', content: text } }] });
     let out;
     if (sys.includes('prise de notes')) out = { text: 'La photosynthèse est la transformation de l\'énergie lumineuse en énergie chimique. Elle a lieu dans les chloroplastes, grâce à la chlorophylle, et produit du glucose et du dioxygène.' };
     else if (sys.includes('structures')) out = { sections: [{ heading: 'Définition', content: '- **Photosynthèse** : transformation de l\'énergie lumineuse en énergie chimique.\n- Lieu : les chloroplastes.', terms: ['photosynthèse', 'chloroplaste'] }] };
     else if (sys.includes('termines')) out = { title: 'La photosynthèse', summary: 'Le professeur définit la photosynthèse.', keyPoints: ['Définition', 'Chloroplastes'], assignments: [{ i: 0, chapter: 'La photosynthèse' }] };
-    else if (sys.includes('fiches de révision')) {
-      return resp(200, { candidates: [{ content: { parts: [{ text: '## Photosynthèse\n- **Définition** : « transformation de l\'énergie lumineuse en énergie chimique ».' }] } }] });
-    } else out = { ok: true };
-    return resp(200, { candidates: [{ content: { parts: [{ text: JSON.stringify(out) }] } }] });
+    else if (sys.includes('fiches de révision')) return reply('## Photosynthèse\n- **Définition** : « transformation de l\'énergie lumineuse en énergie chimique ».');
+    else out = { ok: true };
+    return reply(JSON.stringify(out));
   }
   return resp(404, {});
 }
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cours-'));
-const env = { GROQ_API_KEYS: 'gsk_AAAAAAAAAAAAAAAAAAAAAAAA, gsk_BBBBBBBBBBBBBBBBBBBBBBBB', GEMINI_API_KEYS: 'AIzaCCCCCCCCCCCCCCCCCCCCCCCC', ADMIN_PASSWORD: 'MotDePasseDeTest!' };
+const env = { GROQ_API_KEYS: 'gsk_AAAAAAAAAAAAAAAAAAAAAAAA, gsk_BBBBBBBBBBBBBBBBBBBBBBBB', ADMIN_PASSWORD: 'MotDePasseDeTest!' };
 const store = fileStorage(path.join(dir, 'd.json'));
 const handle = createApi(store, { env, fetch: fakeFetch });
 let H = handle; // le handler utilisé par les clients (remplaçable dans un test)
@@ -183,22 +180,38 @@ await t('la pause expire toute seule puis la clé est réutilisée', async () =>
   assert.equal(used.size, 2, 'les deux clés servent de nouveau');
   await A.del('/api/lessons/' + l.id);
 });
-await t('toutes les clés Groq en pause : bascule sur Gemini pour l\'audio', async () => {
+await t('Whisper turbo en pause sur toutes les clés : bascule sur Whisper large v3', async () => {
   for (const k of await store.list('aicool/')) await store.del(k);
-  const noGroq = (u, i) => (String(u).includes('groq.com') ? Promise.resolve(new Response('{"error":{"message":"limite"}}', { status: 429, headers: { 'retry-after': '120' } })) : fakeFetch(u, i));
-  H = createApi(store, { env, fetch: noGroq });
+  const models = [];
+  const noTurbo = (u, i) => {
+    if (String(u).includes('audio/transcriptions')) { const m = i.body.get('model'); models.push(m); if (m === 'whisper-large-v3-turbo') return Promise.resolve(new Response('{"error":{"message":"limite"}}', { status: 429, headers: { 'retry-after': '120' } })); }
+    return fakeFetch(u, i);
+  };
+  H = createApi(store, { env, fetch: noTurbo });
   const l = (await A.post('/api/lessons', { subjectId: subj.id })).body.lesson;
-  const g0 = calls.gemini.length;
   const r = await A.put('/api/lessons/' + l.id + '/chunks/0', audio);
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.ok(calls.gemini.length > g0, 'Gemini a pris le relais');
+  assert.ok(models.includes('whisper-large-v3'), 'Whisper large v3 a pris le relais');
   H = handle;
   for (const k of await store.list('aicool/')) await store.del(k);
   await A.del('/api/lessons/' + l.id);
 });
+await t('texte : un modèle Groq en pause, le suivant prend le relais', async () => {
+  for (const k of await store.list('aicool/')) await store.del(k);
+  const used = [];
+  const no120 = (u, i) => {
+    if (String(u).includes('chat/completions')) { const m = JSON.parse(i.body).model; used.push(m); if (m === 'openai/gpt-oss-120b') return Promise.resolve(new Response('{"error":{"message":"limite"}}', { status: 429, headers: { 'retry-after': '60' } })); }
+    return fakeFetch(u, i);
+  };
+  H = createApi(store, { env, fetch: no120 });
+  const test = (await ADM.post('/api/admin/ai/test')).body;
+  assert.equal(test.ok, true, JSON.stringify(test));
+  assert.notEqual(test.model, 'openai/gpt-oss-120b');
+  H = handle;
+  for (const k of await store.list('aicool/')) await store.del(k);
+});
 await t('quota partout : 503 + retryAfter, puis tout reprend quand le quota se renouvelle', async () => {
   for (const k of await store.list('aicool/')) await store.del(k);
-  geminiDown = true;
   const allDown = (u, i) => (String(u).includes('groq.com') ? Promise.resolve(new Response('{"error":{"message":"limite"}}', { status: 429, headers: { 'retry-after': '90' } })) : fakeFetch(u, i));
   H = createApi(store, { env, fetch: allDown });
   const l = (await A.post('/api/lessons', { subjectId: subj.id })).body.lesson;
@@ -207,7 +220,7 @@ await t('quota partout : 503 + retryAfter, puis tout reprend quand le quota se r
   assert.equal((await store.list('lchunk/' + l.id + '/')).length, 0, 'rien n\'est enregistré à moitié');
   // le quota se renouvelle : on fait expirer les pauses
   for (const k of await store.list('aicool/')) { const v = await store.get(k); v.until = Date.now() - 1; await store.set(k, v); }
-  geminiDown = false; H = handle;
+  H = handle;
   assert.equal((await A.put('/api/lessons/' + l.id + '/chunks/0', audio)).status, 200);
   await A.del('/api/lessons/' + l.id);
 });
@@ -283,9 +296,9 @@ await t('l\'admin supprime un utilisateur et ses données', async () => {
   assert.equal((await client().post('/api/register', { pseudo: 'bob', password: 'nouveaumdp1' })).status, 201);
 });
 await t('l\'admin gère les clés d\'IA sans redéployer', async () => {
-  const ok = await ADM.post('/api/admin/ai/keys', { provider: 'gemini', key: 'AIzaDDDDDDDDDDDDDDDDDDDDDDDDDD' });
+  const ok = await ADM.post('/api/admin/ai/keys', { provider: 'groq', key: 'gsk_DDDDDDDDDDDDDDDDDDDDDDDDDD' });
   assert.equal(ok.status, 201);
-  assert.equal((await ADM.post('/api/admin/ai/keys', { provider: 'gemini', key: 'AIzaDDDDDDDDDDDDDDDDDDDDDDDDDD' })).status, 409);
+  assert.equal((await ADM.post('/api/admin/ai/keys', { provider: 'groq', key: 'gsk_DDDDDDDDDDDDDDDDDDDDDDDDDD' })).status, 409);
   const st = (await ADM.get('/api/admin/ai')).body;
   assert.equal(st.stored.length, 1); assert.ok(!JSON.stringify(st).includes('DDDDDDDDDD'), 'la clé complète ne sort jamais');
   assert.equal((await ADM.del('/api/admin/ai/keys/' + st.stored[0].id)).status, 200);

@@ -12,29 +12,31 @@ Même architecture que VZ Gym (Armure) : Netlify + une fonction + Netlify Blobs,
 
 1. Mets ce dossier dans un dépôt GitHub (nouveau dépôt, ou sous-dossier avec « Base directory » = `cours`).
 2. Netlify > « Add new site » > « Import an existing project » > ce dépôt. Réglages par défaut (tout est dans `netlify.toml`).
-3. **Ajoute les clés d'IA gratuites** (étape ci-dessous), soit dans Netlify, soit plus tard depuis `/#admin` > « Clés d'IA ».
+3. **Ajoute les clés Groq gratuites** (étape ci-dessous), soit dans Netlify, soit plus tard depuis `/#admin` > « Clés d'IA ».
 4. Ouvre l'adresse `.netlify.app` : le micro n'est autorisé qu'en HTTPS, ce que Netlify fournit.
 
 ## L'IA gratuite et « infinie »
 
-| Rôle | Service | Où créer la clé (gratuit) |
-|---|---|---|
-| Transcription de la voix | Groq (Whisper large v3 turbo) | console.groq.com/keys |
-| Nettoyage, récap, cours, fiches | Google Gemini | aistudio.google.com/apikey |
+Tout passe par **Groq** (clé gratuite sur console.groq.com/keys) :
 
-Variables d'environnement Netlify (plusieurs clés séparées par des virgules) :
-`GROQ_API_KEYS` et `GEMINI_API_KEYS`. Elles peuvent aussi être ajoutées depuis le panneau admin, sans redéployer.
+| Rôle | Modèles Groq |
+|---|---|
+| Transcription de la voix | `whisper-large-v3-turbo`, puis `whisper-large-v3` en secours |
+| Nettoyage, récap, cours, fiches | `openai/gpt-oss-120b`, puis `llama-4-scout`, `llama-3.3-70b-versatile`, `gpt-oss-20b`, `llama-3.1-8b-instant` |
+
+Variable d'environnement Netlify (plusieurs clés séparées par des virgules) : `GROQ_API_KEYS`. Les clés peuvent aussi être
+ajoutées depuis le panneau admin, sans redéployer.
 
 **Comment ça ne s'arrête pas** : quand une clé dépasse son quota (erreur 429), elle est mise en pause jusqu'à l'heure de
-renouvellement donnée par le service (minute, heure, ou minuit pour Gemini), puis réutilisée toute seule. Pendant la pause, le site
-passe à la clé suivante, puis au modèle suivant (`gemini-2.5-flash` puis `gemini-2.5-flash-lite`), et la transcription
-bascule sur Gemini si toutes les clés Groq sont en pause. Si tout est saturé, l'audio reste sur le téléphone et le site
-réessaie tout seul à l'heure indiquée : rien n'est perdu, ça ralentit seulement.
+renouvellement donnée par Groq, puis réutilisée toute seule. Pendant la pause, le site passe à la clé suivante, puis au
+modèle suivant (chaque modèle Groq a son propre quota). Les textes trop longs pour la limite par minute d'un modèle vont
+directement à un modèle qui les accepte (`llama-4-scout` : 30 000 jetons par minute). Si tout est saturé, l'audio reste sur
+le téléphone et le site réessaie tout seul à l'heure indiquée : rien n'est perdu, ça ralentit seulement.
 
-Le gratuit a des plafonds réels. Groq : environ 7 200 secondes d'audio par heure et 28 800 par jour pour **l'ensemble de
-l'organisation** (soit 8 h de cours par jour). Les limites Groq sont par compte et Gemini par projet : ajouter plusieurs
-clés du **même** compte n'augmente rien. Pour plus de marge, ajoute des clés de comptes différents.
-Variables facultatives : `GEMINI_MODELS`, `GROQ_TEXT_MODEL`, `GROQ_STT_MODEL`, `ADMIN_ID`, `ADMIN_PASSWORD`.
+Le gratuit a des plafonds réels. Groq : environ 7 200 secondes d'audio par heure et 28 800 par jour **par organisation**
+(soit 8 h de cours par jour). Les limites sont par compte : ajouter plusieurs clés du **même** compte n'augmente rien.
+Pour plus de marge, ajoute des clés de comptes différents.
+Variables facultatives : `GROQ_TEXT_MODELS`, `GROQ_STT_MODEL`, `ADMIN_ID`, `ADMIN_PASSWORD`.
 
 ## Enregistrer avec l'écran allumé
 

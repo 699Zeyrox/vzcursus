@@ -3,7 +3,7 @@ import http from 'node:http'; import fs from 'node:fs'; import path from 'node:p
 import { fileURLToPath } from 'node:url';
 import { createApi } from '../lib/core.mjs'; import { fileStorage } from '../lib/storage-file.mjs'; import { fakeFetch } from './fake-ai.mjs';
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
-const env = { GROQ_API_KEYS: 'gsk_AAAAAAAAAAAAAAAAAAAAAAAA', GEMINI_API_KEYS: 'AIzaCCCCCCCCCCCCCCCCCCCCCCCC', ADMIN_PASSWORD: 'MotDePasseDeTest!' };
+const env = { GROQ_API_KEYS: 'gsk_AAAAAAAAAAAAAAAAAAAAAAAA', ADMIN_PASSWORD: 'MotDePasseDeTest!' };
 const handle = createApi(fileStorage(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'e2e-')), 'd.json')), { env, fetch: fakeFetch });
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
 http.createServer(async (req, res) => {

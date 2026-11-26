@@ -586,17 +586,18 @@ export function createApi(store, opts = {}) {
       /* clés d'IA : ajoutées / retirées sans redéployer */
       if (m === 'GET' && p === '/api/admin/ai') {
         const doc = (await store.get('aikeys')) || { items: [] };
+        doc.items = doc.items.filter((k) => k.provider === 'groq');
         const status = await ai.status();
-        const inEnv = (prov) => (((prov === 'groq' ? env.GROQ_API_KEYS || env.GROQ_API_KEY : env.GEMINI_API_KEYS || env.GEMINI_API_KEY) || '').split(/[\s,;]+/).filter(Boolean).length);
+        const inEnv = (prov) => (((prov === 'groq' ? env.GROQ_API_KEYS || env.GROQ_API_KEY : '') || '').split(/[\s,;]+/).filter(Boolean).length);
         return json(200, {
           stored: doc.items.map((k) => ({ id: k.id, provider: k.provider, mask: k.mask, disabled: !!k.disabled, addedAt: k.addedAt })),
-          envCount: { groq: inEnv('groq'), gemini: inEnv('gemini') }, status, now: Date.now(),
+          envCount: { groq: inEnv('groq') }, status, now: Date.now(),
         });
       }
       if (m === 'POST' && p === '/api/admin/ai/keys') {
-        const provider = body.provider === 'groq' ? 'groq' : body.provider === 'gemini' ? 'gemini' : '';
+        const provider = !body.provider || body.provider === 'groq' ? 'groq' : '';
         const key = str(body.key, 300);
-        if (!provider || key.length < 20 || /\s/.test(key)) return json(400, { error: 'Choisis le service et colle une clé valide.' });
+        if (!provider || key.length < 20 || /\s/.test(key)) return json(400, { error: 'Colle une clé Groq valide (elle commence par gsk_).' });
         const doc = (await store.get('aikeys')) || { items: [] };
         const id = keyId(key);
         if (doc.items.some((k) => k.id === id)) return json(409, { error: 'Cette clé est déjà enregistrée.' });
