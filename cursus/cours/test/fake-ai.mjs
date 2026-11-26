@@ -1,8 +1,7 @@
 // IA simulée partagée par les tests
-/* ----- IA simulée (Groq + Gemini) ----- */
-export const calls = { groqStt: [], gemini: [], groqChat: 0 };
+/* ----- IA simulée (Groq) ----- */
+export const calls = { groqStt: [], groqChat: 0 };
 export let quotaOnKey = null;       // clé Groq qui répond 429
-export let geminiDown = false;      // Gemini répond 429 « par jour »
 export function fakeFetch(url, init) {
   const u = String(url);
   const hdr = init.headers || {};
@@ -18,20 +17,18 @@ export function fakeFetch(url, init) {
       { text: ' Elle a lieu dans les chloroplastes, grâce à la chlorophylle, et produit du glucose et du dioxygène.', avg_logprob: -0.25, no_speech_prob: 0.02, compression_ratio: 1.5 },
     ] });
   }
-  if (u.includes('generativelanguage.googleapis.com')) {
-    calls.gemini.push(u);
-    if (geminiDown) return resp(429, { error: { message: 'Quota exceeded for metric ... PerDay', details: [] } });
+  if (u.includes('api.groq.com/openai/v1/chat/completions')) {
+    calls.groqChat++;
     const body = JSON.parse(init.body);
-    if (!body.systemInstruction) return resp(200, { candidates: [{ content: { parts: [{ text: 'Transcription de secours par Gemini : la photosynthèse a lieu dans les chloroplastes.' }] } }] });
-    const sys = body.systemInstruction.parts[0].text;
+    const sys = body.messages[0].content;
+    const reply = (text) => resp(200, { choices: [{ message: { role: 'assistant', content: text } }] });
     let out;
     if (sys.includes('prise de notes')) out = { text: 'La photosynthèse est la transformation de l\'énergie lumineuse en énergie chimique. Elle a lieu dans les chloroplastes, grâce à la chlorophylle, et produit du glucose et du dioxygène.' };
     else if (sys.includes('structures')) out = { sections: [{ heading: 'Définition', content: '- **Photosynthèse** : transformation de l\'énergie lumineuse en énergie chimique.\n- Lieu : les chloroplastes.', terms: ['photosynthèse', 'chloroplaste'] }] };
     else if (sys.includes('termines')) out = { title: 'La photosynthèse', summary: 'Le professeur définit la photosynthèse.', keyPoints: ['Définition', 'Chloroplastes'], assignments: [{ i: 0, chapter: 'La photosynthèse' }] };
-    else if (sys.includes('fiches de révision')) {
-      return resp(200, { candidates: [{ content: { parts: [{ text: '## Photosynthèse\n- **Définition** : « transformation de l\'énergie lumineuse en énergie chimique ».' }] } }] });
-    } else out = { ok: true };
-    return resp(200, { candidates: [{ content: { parts: [{ text: JSON.stringify(out) }] } }] });
+    else if (sys.includes('fiches de révision')) return reply('## Photosynthèse\n- **Définition** : « transformation de l\'énergie lumineuse en énergie chimique ».');
+    else out = { ok: true };
+    return reply(JSON.stringify(out));
   }
   return resp(404, {});
 }

@@ -644,9 +644,8 @@ function adminView() {
       (ai.stored.find((s) => s.id === k.id) ? '<div class="row"><button class="btn sm danger" data-act="adminkeydel" data-v="' + k.id + '">Retirer</button></div>' : '<span class="muted small">Définie dans Netlify (variable d\'environnement)</span>') + '</div>').join('') : '';
     body = !ai ? '<p class="muted">Chargement…</p>' :
       '<p class="muted small">Quand une clé dépasse son quota gratuit, elle est mise en pause jusqu\'à son renouvellement puis réutilisée toute seule. Plus tu ajoutes de clés (de comptes différents), plus la limite recule.</p>' +
-      '<h2>Groq (transcription)</h2><div class="list">' + (keyRows('groq') || '<p class="muted">Aucune clé.</p>') + '</div>' +
-      '<h2>Gemini (cours, récaps, fiches)</h2><div class="list">' + (keyRows('gemini') || '<p class="muted">Aucune clé.</p>') + '</div>' +
-      '<form data-form="addkey" class="card list"><b>Ajouter une clé</b><label class="field"><span>Service</span><select id="k_prov"><option value="groq">Groq (console.groq.com/keys)</option><option value="gemini">Gemini (aistudio.google.com/apikey)</option></select></label><label class="field"><span>Clé</span><input id="k_key" type="password" autocomplete="off" required></label><p class="err" id="k_err" role="alert"></p><button class="btn" type="submit">Ajouter</button></form>' +
+      '<h2>Groq (transcription, cours, récaps, fiches)</h2><div class="list">' + (keyRows('groq') || '<p class="muted">Aucune clé.</p>') + '</div>' +
+      '<form data-form="addkey" class="card list"><b>Ajouter une clé Groq</b><span class="muted small">À créer sur console.groq.com/keys</span><label class="field"><span>Clé</span><input id="k_key" type="password" autocomplete="off" required></label><p class="err" id="k_err" role="alert"></p><button class="btn" type="submit">Ajouter</button></form>' +
       '<button class="btn soft" data-act="admintest">Tester l\'IA</button><p id="k_test" class="muted small" role="status"></p>';
   }
   return '<header class="top"><h1>Administration</h1><button class="btn sm ghost" data-act="adminlogout">Quitter</button></header><main class="page"><div class="seg"><button data-act="admintab" data-v="users" aria-pressed="' + (tab === 'users') + '">Utilisateurs</button><button data-act="admintab" data-v="ai" aria-pressed="' + (tab === 'ai') + '">Clés d\'IA</button></div>' + body + '</main>';
@@ -805,7 +804,7 @@ document.addEventListener('submit', async (e) => {
     } else if (kind === 'accept') {
       const r = await api('POST', '/api/share/' + f.dataset.id + '/accept', { subjectId: val('ac_sub') || undefined }); closeModal(); toast('Ajouté à tes cours.'); await loadAll(); loadInbox();
     } else if (kind === 'addkey') {
-      await api('POST', '/api/admin/ai/keys', { provider: val('k_prov'), key: val('k_key') }); await adminLoad(); toast('Clé ajoutée.');
+      await api('POST', '/api/admin/ai/keys', { provider: 'groq', key: val('k_key') }); await adminLoad(); toast('Clé ajoutée.');
     }
   } catch (er) {
     const map = { auth: 'a_err', adminlogin: 'ad_err', subject: 'sj_err', newsheet: 'ns_err', pw: 'pw_err', share: 'sh_err', accept: 'ac_err', addkey: 'k_err' };

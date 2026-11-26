@@ -1,6 +1,6 @@
 /*
   Serveur local de test : node server.mjs  puis  http://localhost:3000
-  Variables : GROQ_API_KEYS, GEMINI_API_KEYS (voir README). Données dans data/cours.json.
+  Variables : GROQ_API_KEYS (voir README). Données dans data/cours.json.
   Attention : le micro n'est autorisé que sur localhost ou en HTTPS.
 */
 import http from 'node:http';

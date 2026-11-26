@@ -1,13 +1,13 @@
 /*
-  Couche IA : transcription (Groq Whisper, secours Gemini) et texte (Gemini, secours Groq).
+  Couche IA : uniquement Groq — transcription (Whisper) et texte (gpt-oss, Llama…).
   Chaque service gratuit a des quotas. Pour que ça tienne « à l'infini » :
     - on peut donner PLUSIEURS clés (variables d'environnement ou panneau admin) ;
     - quand une clé dépasse son quota (erreur 429), elle est mise en pause jusqu'à l'heure de
       renouvellement indiquée par le service (minute, heure ou minuit), puis réutilisée toute seule ;
     - pendant ce temps on passe à la clé / au modèle / au service suivant ;
     - si tout est en pause, l'API répond 503 avec « retryAfter » et le site réessaie tout seul.
-  Variables : GROQ_API_KEYS, GEMINI_API_KEYS (clés séparées par des virgules),
-  GEMINI_MODELS (défaut gemini-2.5-flash,gemini-2.5-flash-lite), GROQ_TEXT_MODEL, GROQ_STT_MODEL.
+  Variables : GROQ_API_KEYS (clés séparées par des virgules),
+  GROQ_TEXT_MODELS (liste de modèles, dans l'ordre de préférence), GROQ_STT_MODEL.
 */
 import crypto from 'node:crypto';
 
@@ -21,14 +21,6 @@ function shuffle(a) {
   const r = a.slice();
   for (let i = r.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [r[i], r[j]] = [r[j], r[i]]; }
   return r;
-}
-
-// Prochain renouvellement quotidien de Gemini : minuit heure du Pacifique, soit 07h ou 08h UTC (on prend 08h05).
-function nextDailyReset(now = Date.now()) {
-  const d = new Date(now);
-  let t = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 8, 5);
-  if (t <= now + 60 * 1000) t += 24 * HOUR;
-  return t;
 }
 
 function quotaErr(waitMs, msg) { return Object.assign(new Error(msg || 'Quota dépassé'), { quota: true, waitMs: Math.max(5000, Math.min(waitMs, 26 * HOUR)) }); }
@@ -48,12 +40,21 @@ export function createAi(store, opts = {}) {
   const env = opts.env || (typeof process !== 'undefined' ? process.env : {});
   const doFetch = opts.fetch || ((...a) => fetch(...a));
 
-  const geminiModels = () => (env.GEMINI_MODELS || 'gemini-2.5-flash,gemini-2.5-flash-lite').split(/[\s,;]+/).filter(Boolean);
-  const groqTextModel = () => env.GROQ_TEXT_MODEL || 'openai/gpt-oss-120b';
+  // Modèles texte de Groq, du préféré au dernier recours. « tpm » = jetons par minute du palier gratuit,
+  // « out » = sortie maximale. Une requête trop grosse pour un modèle passe directement au suivant.
+  const MODEL_INFO = {
+    'openai/gpt-oss-120b': { tpm: 8000, out: 32000 },
+    'meta-llama/llama-4-scout-17b-16e-instruct': { tpm: 30000, out: 8192 },
+    'llama-3.3-70b-versatile': { tpm: 12000, out: 32000 },
+    'openai/gpt-oss-20b': { tpm: 8000, out: 32000 },
+    'llama-3.1-8b-instant': { tpm: 6000, out: 8192 },
+  };
+  const DEFAULT_TEXT_MODELS = 'openai/gpt-oss-120b,meta-llama/llama-4-scout-17b-16e-instruct,llama-3.3-70b-versatile,openai/gpt-oss-20b,llama-3.1-8b-instant';
+  const groqTextModels = () => (env.GROQ_TEXT_MODELS || env.GROQ_TEXT_MODEL || DEFAULT_TEXT_MODELS).split(/[\s,;]+/).filter(Boolean);
   const groqSttModel = () => env.GROQ_STT_MODEL || 'whisper-large-v3-turbo';
 
   async function keys(provider) {
-    const raw = provider === 'groq' ? (env.GROQ_API_KEYS || env.GROQ_API_KEY || '') : (env.GEMINI_API_KEYS || env.GEMINI_API_KEY || '');
+    const raw = provider === 'groq' ? (env.GROQ_API_KEYS || env.GROQ_API_KEY || '') : '';
     const fromEnv = raw.split(/[\s,;]+/).filter(Boolean);
     const doc = (await store.get('aikeys')) || { items: [] };
     const fromStore = doc.items.filter((k) => k.provider === provider && !k.disabled).map((k) => k.key);
@@ -77,35 +78,12 @@ export function createAi(store, opts = {}) {
         const ri = det.find((d) => d && d.retryDelay);
         if (ri) wait = Math.max(wait, parseFloat(ri.retryDelay) * 1000 || 0);
       }
-      if (provider === 'gemini' && /per ?day|PerDay/i.test(String(msg) + JSON.stringify(det || ''))) wait = Math.max(wait, nextDailyReset() - Date.now());
       if (!wait) wait = 60 * 1000;
       return quotaErr(wait, String(msg).slice(0, 200));
     }
     if (r.status === 401 || r.status === 403 || (r.status === 400 && /API key/i.test(String(msg)))) return badKeyErr(String(msg).slice(0, 200));
     if (r.status >= 500 || r.status === 408) return transientErr(String(msg).slice(0, 200));
     return Object.assign(new Error(String(msg).slice(0, 300)), { status: r.status, fatal: true });
-  }
-
-  async function geminiText(key, model, { system, user, json, maxTokens }) {
-    const body = {
-      systemInstruction: { parts: [{ text: system }] },
-      contents: [{ role: 'user', parts: [{ text: user }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: maxTokens || 8192 },
-    };
-    if (json) body.generationConfig.responseMimeType = 'application/json';
-    if (/2\.5/.test(model)) body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    let r;
-    try {
-      r = await doFetch('https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent', {
-        method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body),
-      });
-    } catch (e) { throw transientErr('Réseau : ' + e.message); }
-    if (!r.ok) throw classify(r, await readErr(r), 'gemini');
-    const j = await r.json();
-    const c = j.candidates && j.candidates[0];
-    const text = c && c.content && Array.isArray(c.content.parts) ? c.content.parts.map((p) => p.text || '').join('') : '';
-    if (!text) throw transientErr('Réponse vide' + (j.promptFeedback && j.promptFeedback.blockReason ? ' (' + j.promptFeedback.blockReason + ')' : ''));
-    return text;
   }
 
   async function groqText(key, model, { system, user, json, maxTokens }) {
@@ -143,29 +121,6 @@ export function createAi(store, opts = {}) {
     return { text: j.text || '', segments: Array.isArray(j.segments) ? j.segments : null, duration: j.duration || 0 };
   }
 
-  async function geminiStt(key, model, { bytes, mime, language }) {
-    const m = /mp4|m4a/.test(mime || '') ? 'audio/aac' : (mime || 'audio/webm').split(';')[0];
-    const body = {
-      contents: [{ role: 'user', parts: [
-        { text: 'Transcris fidèlement ce passage d\'un cours (langue : ' + (language || 'fr') + '). Ne transcris que la voix de l\'enseignant ; ignore les bruits et les conversations parallèles. Renvoie uniquement le texte, sans commentaire. S\'il n\'y a aucune parole exploitable, renvoie une réponse vide.' },
-        { inlineData: { mimeType: m, data: Buffer.from(bytes).toString('base64') } },
-      ] }],
-      generationConfig: { temperature: 0 },
-    };
-    if (/2\.5/.test(model)) body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    let r;
-    try {
-      r = await doFetch('https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent', {
-        method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body),
-      });
-    } catch (e) { throw transientErr('Réseau : ' + e.message); }
-    if (!r.ok) throw classify(r, await readErr(r), 'gemini');
-    const j = await r.json();
-    const c = j.candidates && j.candidates[0];
-    const text = c && c.content && Array.isArray(c.content.parts) ? c.content.parts.map((p) => p.text || '').join('') : '';
-    return { text: text.trim(), segments: null, duration: 0 };
-  }
-
   /* ----- rotation : essaie chaque (service, modèle, clé) non mis en pause ----- */
   const coolKey = (provider, key, model) => 'aicool/' + sha(provider + '|' + key + '|' + model).slice(0, 20);
 
@@ -192,46 +147,53 @@ export function createAi(store, opts = {}) {
     throw Object.assign(new Error(none ? 'Aucune clé IA n\'est configurée. L\'administrateur doit en ajouter une.' : 'Le service d\'IA est saturé pour le moment. Nouvelle tentative automatique.'), { status: none ? 501 : 503, retryAfter, ai: true });
   }
 
-  async function textCandidates(approxChars) {
-    const out = [];
-    const gk = await keys('gemini');
-    for (const model of geminiModels()) for (const key of gk) out.push({ provider: 'gemini', model, key });
-    if (approxChars < 14000) { // plafond de 8 000 jetons par minute sur le palier gratuit de Groq
-      const kk = await keys('groq');
-      for (const key of kk) out.push({ provider: 'groq', model: groqTextModel(), key });
-    }
-    return out;
-  }
+  // Jetons d'entrée estimés (≈ 3 caractères par jeton en français, on reste prudent)
+  const estTokens = (chars) => Math.ceil(chars / 3) + 50;
 
   return {
     /* texte : rend { text, json, provider, model } */
     async text({ system, user, json, maxTokens }) {
-      const cands = await textCandidates(system.length + user.length);
-      const r = await rotate(cands, (c) => (c.provider === 'gemini' ? geminiText : groqText)(c.key, c.model, { system, user, json, maxTokens }));
-      return { text: r.value, json: json ? parseJsonLoose(r.value) : null, provider: r.provider, model: r.model };
+      const kk = await keys('groq');
+      const inTok = estTokens(system.length + user.length);
+      let last = null;
+      for (const model of groqTextModels()) {
+        const info = MODEL_INFO[model] || { tpm: 8000, out: 8192 };
+        // Groq compte entrée + sortie demandée dans la limite par minute : on ajuste la sortie au budget du modèle
+        const room = Math.min(info.out, info.tpm - inTok - 100);
+        if (room < Math.min(1024, maxTokens || 4096)) continue; // trop gros pour ce modèle
+        const mt = Math.min(maxTokens || 4096, room);
+        const cands = kk.map((key) => ({ provider: 'groq', model, key }));
+        try {
+          const r = await rotate(cands, (c) => groqText(c.key, c.model, { system, user, json, maxTokens: mt }));
+          const parsed = json ? parseJsonLoose(r.value) : null;
+          if (json && !parsed) { last = Object.assign(new Error('Réponse de l\'IA illisible, nouvelle tentative…'), { status: 502, retryAfter: 3 }); continue; }
+          return { text: r.value, json: parsed, provider: r.provider, model: r.model };
+        } catch (e) {
+          if (e.status === 501) throw e; // aucune clé
+          if (!last || !last.ai || (e.ai && (e.retryAfter || 0) < (last.retryAfter || Infinity))) last = e;
+        }
+      }
+      if (last) throw last;
+      throw Object.assign(new Error(kk.length ? 'Texte trop long pour les modèles disponibles.' : 'Aucune clé IA n\'est configurée. L\'administrateur doit en ajouter une.'), { status: kk.length ? 413 : 501 });
     },
     /* audio -> texte : rend { text, segments|null, duration } */
     async transcribe({ bytes, mime, language, prompt }) {
-      const cands = [];
-      for (const key of await keys('groq')) cands.push({ provider: 'groq', model: groqSttModel(), key });
-      for (const key of await keys('gemini')) cands.push({ provider: 'gemini', model: geminiModels()[1] || geminiModels()[0], key });
-      // Whisper d'abord : on ne bascule sur Gemini que si toutes les clés Groq sont en pause
-      const groqFirst = cands.filter((c) => c.provider === 'groq');
-      const rest = cands.filter((c) => c.provider !== 'groq');
-      const run = (c) => (c.provider === 'groq' ? groqStt : geminiStt)(c.key, c.model, { bytes, mime, language, prompt });
-      if (groqFirst.length) {
-        try { return (await rotate(groqFirst, run)).value; }
-        catch (e) { if (!e.ai || !rest.length) throw e; }
+      const kk = await keys('groq');
+      const models = [groqSttModel()].concat(groqSttModel() === 'whisper-large-v3' ? [] : ['whisper-large-v3']);
+      const run = (c) => groqStt(c.key, c.model, { bytes, mime, language, prompt });
+      // Whisper turbo d'abord ; si toutes les clés sont en pause, Whisper large v3 (quota séparé) prend le relais
+      for (let i = 0; i < models.length; i++) {
+        try { return (await rotate(kk.map((key) => ({ provider: 'groq', model: models[i], key })), run)).value; }
+        catch (e) { if (!e.ai || e.status === 501 || i === models.length - 1) throw e; }
       }
-      return (await rotate(rest, run)).value;
     },
     /* état des clés pour le panneau admin */
     async status() {
       const now = Date.now();
-      const out = { groq: [], gemini: [] };
-      for (const provider of ['groq', 'gemini']) {
+      const out = { groq: [] };
+      for (const provider of ['groq']) {
         for (const key of await keys(provider)) {
-          const models = provider === 'groq' ? [groqSttModel(), groqTextModel()] : geminiModels();
+          const models = [groqSttModel(), ...groqTextModels()];
           const cooling = [];
           for (const model of models) {
             const c = await store.get(coolKey(provider, key, model));
