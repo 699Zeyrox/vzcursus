@@ -563,7 +563,6 @@ function authView() {
     '<label class="field"><span>Pseudo</span><input id="a_pseudo" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="16" required></label>' +
     '<label class="field"><span>Mot de passe' + (authMode === 'register' ? ' (8 caractères minimum)' : '') + '</span><input id="a_pw" type="password" autocomplete="' + (authMode === 'register' ? 'new-password' : 'current-password') + '" maxlength="64" required></label>' +
     '<label class="row small muted"><input type="checkbox" id="a_rem" checked> Rester connecté sur cet appareil</label>' +
-    (authMode === 'register' ? '<p class="notice">Bon à savoir : l\'administrateur du site peut voir tes cours, tes fiches et tes connexions (date, adresse IP, lieu approximatif, appareil).</p>' : '') +
     '<p class="err" id="a_err" role="alert"></p>' +
     '<button class="btn" type="submit">' + (authMode === 'register' ? 'Créer mon compte' : 'Se connecter') + '</button></form>' +
     '<button class="btn ghost sm" data-act="admin">Administration</button></div>';
@@ -793,7 +792,6 @@ function accountView() {
     appearanceCard() +
     `<form data-form="pw" class="card list"><b>Changer de mot de passe</b><label class="field"><span>Mot de passe actuel</span><input id="pw_cur" type="password" autocomplete="current-password" required></label><label class="field"><span>Nouveau mot de passe (8 caractères minimum)</span><input id="pw_new" type="password" autocomplete="new-password" minlength="8" maxlength="64" required></label><p class="err" id="pw_err" role="alert"></p><button class="btn" type="submit">Changer</button></form>` +
     `<div class="card list"><b>Installer sur le téléphone</b><p class="muted small">Dans le menu du navigateur : « Ajouter à l'écran d'accueil ». Cursus s'ouvre alors comme une appli, plus simple pour enregistrer.</p></div>` +
-    `<div class="card list"><b>Confidentialité</b><p class="muted small">L'administrateur du site peut voir tes cours, tes fiches et tes connexions (date, adresse IP, lieu approximatif, appareil). Tes enregistrements audio ne sont pas conservés : seul le texte l'est.</p></div>` +
     `<button class="btn ghost" data-act="logout">Se déconnecter</button>`);
 }
 
