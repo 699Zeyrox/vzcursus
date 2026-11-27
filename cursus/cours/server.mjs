@@ -45,7 +45,7 @@ async function api(req, res, url) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     const audio = /^audio\//i.test(req.headers['content-type'] || '');
     try {
-      const buf = await readBody(req, audio ? 6 * 1024 * 1024 : 400 * 1024);
+      const buf = await readBody(req, audio ? 6 * 1024 * 1024 : 1024 * 1024);
       if (audio) bytes = new Uint8Array(buf); else raw = buf.toString('utf8');
     } catch (e) { res.writeHead(413, SEC); return res.end(); }
   }
