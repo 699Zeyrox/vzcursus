@@ -38,6 +38,50 @@ const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 const pad4 = (n) => String(n).padStart(4, '0');
 const words = (t) => (String(t || '').match(/\S+/g) || []).length;
+/* découpe en phrases (la transcription du prof est ensuite gardée MOT POUR MOT : l'IA ne fait que numéroter/retirer/titrer) */
+export function splitSentences(text) {
+  const base = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!base) return [];
+  const out = [];
+  base.split(/(?<=[.!?…»])\s+(?=[A-ZÀ-ÖØ-Þ«"'(\d])/).forEach((raw) => {
+    let t = raw.trim();
+    while (t.length > 500) { // phrase sans ponctuation : on coupe à une virgule
+      const cut = t.lastIndexOf(', ', 420);
+      const at = cut > 120 ? cut + 1 : 420;
+      out.push(t.slice(0, at).trim()); t = t.slice(at).trim();
+    }
+    if (t) out.push(t);
+  });
+  return out;
+}
+const escRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export function boldTerms(text, terms) {
+  let out = text;
+  const seen = new Set();
+  (terms || []).forEach((t) => {
+    const k = String(t || '').trim();
+    if (k.length < 3 || k.length > 60 || seen.has(k.toLowerCase())) return;
+    seen.add(k.toLowerCase());
+    let done = false;
+    out = out.replace(new RegExp(escRe(k), 'iu'), (m, off, whole) => {
+      if (done || whole.slice(Math.max(0, off - 2), off) === '**') return m;
+      done = true; return '**' + m + '**';
+    });
+  });
+  return out;
+}
+/* appareil lisible à partir du User-Agent */
+export function parseUa(ua) {
+  ua = String(ua || '');
+  const os = /iPhone|iPad|iPod/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'macOS' : /CrOS/.test(ua) ? 'ChromeOS' : /Linux/.test(ua) ? 'Linux' : 'Inconnu';
+  const browser = /Edg\//.test(ua) ? 'Edge' : /OPR\/|Opera/.test(ua) ? 'Opera' : /SamsungBrowser/.test(ua) ? 'Samsung Internet' : /Firefox|FxiOS/.test(ua) ? 'Firefox' : /CriOS|Chrome/.test(ua) ? 'Chrome' : /Safari/.test(ua) ? 'Safari' : 'Inconnu';
+  const type = /iPad|Tablet/.test(ua) || (/Android/.test(ua) && !/Mobile/.test(ua)) ? 'Tablette' : /Mobi|iPhone|Android/.test(ua) ? 'Téléphone' : 'Ordinateur';
+  let model = (/Android [\d.]+;\s*([^;)]+)/.exec(ua) || [])[1] || (/iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : '');
+  if (model.length < 2) model = '';
+  return { os, browser, type, model, label: type + (model ? ' ' + model : '') + ' · ' + os + ' · ' + browser };
+}
+const HEX = /^#[0-9a-f]{6}$/i;
+
 const COLORS = ['#e4572e', '#f2a541', '#3a9d5d', '#2e86ab', '#6a4c93', '#d1478c', '#4f6d7a', '#8a5a44'];
 const LANGS = ['fr', 'en', 'es', 'de', 'it', 'pt', 'nl', 'ar'];
 const LANG_NAMES = { fr: 'français', en: 'anglais', es: 'espagnol', de: 'allemand', it: 'italien', pt: 'portugais', nl: 'néerlandais', ar: 'arabe' };
@@ -163,9 +207,9 @@ export function createApi(store, opts = {}) {
     if (a.n >= 5) a.until = Date.now() + Math.min(15 * 60, 30 * Math.pow(2, a.n - 5)) * 1000;
     await store.set('rl/' + key, a);
   }
-  function parseBody(req) {
+  function parseBody(req, max) {
     const raw = req.rawBody || '';
-    if (raw.length > MAX_BODY) throw fail(413, 'Requête trop volumineuse.');
+    if (raw.length > (max || MAX_BODY)) throw fail(413, 'Requête trop volumineuse.');
     if (!raw) return {};
     let b;
     try { b = JSON.parse(raw); } catch (e) { throw fail(400, 'Données invalides.'); }
@@ -184,6 +228,43 @@ export function createApi(store, opts = {}) {
   const getSheetsIdx = async (uid) => (await store.get('usheets/' + uid)) || { items: [] };
   const getInbox = async (uid) => (await store.get('inbox/' + uid)) || { items: [] };
   const getOutbox = async (uid) => (await store.get('outbox/' + uid)) || { items: [] };
+
+  const PREF_DEFAULT = { mode: 'auto', accent: '', mark: '', bgType: 'none', bgColor: '', veil: 55, paper: 'seyes', size: 'm', font: 'serif', bgV: 0 };
+  const getPrefs = async (uid) => Object.assign({}, PREF_DEFAULT, (await store.get('prefs/' + uid)) || {});
+
+  /* suivi des connexions : visible par l'administrateur (les utilisateurs en sont informés dans l'appli) */
+  const geoOf = (req) => { const g = req.geo || {}; return { city: str(g.city, 60), region: str(g.region, 60), country: str(g.country, 60) }; };
+  async function recordConn(user, req, kind) {
+    const now = Date.now();
+    const ev = Object.assign({ at: now, kind, ip: str(req.ip, 64), ua: str(req.headers['user-agent'], 300) }, geoOf(req));
+    const c = (await store.get('conn/' + user.id)) || { logins: 0, visits: 0, items: [] };
+    if (kind === 'visit') c.visits++; else c.logins++;
+    c.items.unshift(ev); c.items = c.items.slice(0, 30);
+    await store.set('conn/' + user.id, c);
+    await store.set('presence/' + user.id, { lastSeen: now, ip: ev.ip, ua: ev.ua, city: ev.city, region: ev.region, country: ev.country, offline: false });
+  }
+  async function touchPresence(user, req) { // appelé par le ping de la page (toutes les ~90 s quand elle est visible)
+    const now = Date.now();
+    const pr = await store.get('presence/' + user.id);
+    if (pr && !pr.offline && now - pr.lastSeen < 60000) return;
+    if (!pr || pr.offline || now - pr.lastSeen > 30 * 60000) { await recordConn(user, req, 'visit'); return; } // nouvelle visite
+    await store.set('presence/' + user.id, Object.assign({}, pr, { lastSeen: now }));
+  }
+  async function adminDetail(u) {
+    const now = Date.now();
+    const conn = (await store.get('conn/' + u.id)) || { logins: 0, visits: 0, items: [] };
+    const pr = await store.get('presence/' + u.id);
+    const idx = (await getIndex(u.id)).items;
+    const withDev = (e) => Object.assign({}, e, { device: parseUa(e.ua) });
+    const lastLogin = conn.items.find((e) => e.kind !== 'visit');
+    return {
+      user: { id: u.id, pseudo: u.pseudo, joined: u.joined, lang: u.lang || 'fr' },
+      online: !!(pr && !pr.offline && now - pr.lastSeen < 3 * 60000), lastSeen: pr ? pr.lastSeen : 0, lastLogin: lastLogin ? lastLogin.at : 0,
+      logins: conn.logins, visits: conn.visits, last: pr ? withDev(pr) : null, events: conn.items.map(withDev),
+      subjects: (await getSubjects(u.id)).items.map((x) => ({ id: x.id, name: x.name, color: x.color, lessons: idx.filter((l) => l.subjectId === x.id).length })),
+      lessons: idx, sheets: (await getSheetsIdx(u.id)).items,
+    };
+  }
 
   async function ownLesson(user, id) {
     const l = /^l_[a-f0-9]+$/.test(id) ? await store.get('lesson/' + id) : null;
@@ -206,7 +287,7 @@ export function createApi(store, opts = {}) {
   async function dropSectionsOf(uid, sid, lessonId) {
     const c = await getCourse(uid, sid);
     c.chapters.forEach((ch) => { ch.sections = ch.sections.filter((s) => s.lessonId !== lessonId); });
-    c.chapters = c.chapters.filter((ch) => ch.sections.length);
+    c.chapters = c.chapters.filter((ch) => ch.sections.length || !ch.auto); // un chapitre créé à la main reste, même vide
     await store.set('course/' + uid + '/' + sid, c);
   }
   async function deleteLesson(l) {
@@ -229,64 +310,95 @@ export function createApi(store, opts = {}) {
     for (const x of (await getIndex(u.id)).items) { const l = await store.get('lesson/' + x.id); if (l) await deleteLesson(l); }
     for (const x of (await getSheetsIdx(u.id)).items) { const s = await store.get('sheet/' + x.id); if (s) await deleteSheet(s); }
     for (const s of (await getSubjects(u.id)).items) await store.del('course/' + u.id + '/' + s.id);
-    for (const k of ['user/', 'subj/', 'ulessons/', 'usheets/', 'inbox/', 'outbox/']) await store.del(k + u.id);
+    for (const k of ['user/', 'subj/', 'ulessons/', 'usheets/', 'inbox/', 'outbox/', 'prefs/', 'prefbg/', 'conn/', 'presence/']) await store.del(k + u.id);
     const idx = await store.get('pseudo/' + u.pseudoLower);
     if (idx && idx.id === u.id) await store.del('pseudo/' + u.pseudoLower);
   }
 
   /* ---------- ajout de sections au cours global d'une matière ---------- */
-  function addToCourse(course, chapterTitle, section) {
-    const key = norm(chapterTitle);
-    let ch = course.chapters.find((c) => norm(c.title) === key);
-    if (!ch) { ch = { id: 'c_' + rid(4), title: chapterTitle, sections: [] }; course.chapters.push(ch); }
-    ch.sections.push(Object.assign({ id: 's_' + rid(4) }, section));
-    ch.sections.sort((a, b) => String(a.date || '').localeCompare(String(b.date || ''))); // tri stable : l'ordre dans la séance est conservé
+  function addToCourse(course, chapterTitle, section, chapterId) {
+    let ch = chapterId ? course.chapters.find((c) => c.id === chapterId) : null;
+    if (!ch) { const key = norm(chapterTitle); ch = course.chapters.find((c) => norm(c.title) === key); }
+    if (!ch) { ch = { id: 'c_' + rid(4), title: chapterTitle, auto: true, sections: [] }; course.chapters.push(ch); }
+    ch.sections.push(Object.assign({ id: 's_' + rid(4) }, section)); // l'ordre d'arrivée est l'ordre du cours
+    return ch;
   }
 
   /* ---------- traitement d'une séance, étape par étape (chaque appel reste court) ---------- */
   const langName = (u) => LANG_NAMES[u.lang || 'fr'] || 'français';
 
+  /*
+    Fidélité : l'IA ne réécrit jamais le cours. Elle reçoit les phrases du prof NUMÉROTÉES et ne répond que par
+    des numéros (phrases à retirer = bruit ; coupures en sections) et de rares corrections de mots mal entendus.
+    Le texte final est donc fait des phrases exactes du prof, toutes, dans l'ordre.
+  */
   async function stepClean(user, l, n) {
     const ch = await store.get('lchunk/' + l.id + '/' + pad4(n));
+    const sents = splitSentences(ch ? ch.text : '');
+    if (!sents.length) { await store.set('lnote/' + l.id + '/' + pad4(n), { n, text: '' }); return; }
     const prev = n > 0 ? await store.get('lnote/' + l.id + '/' + pad4(n - 1)) : null;
-    const tail = prev && prev.text ? prev.text.slice(-400) : '(début du cours)';
-    const subject = l.subjectName;
+    const tail = prev && prev.text ? prev.text.slice(-300) : '(début du cours)';
+    let numbered = '', used = 0;
+    for (let i = 0; i < sents.length; i++) { const line = (i + 1) + '. ' + sents[i] + '\n'; if (numbered.length + line.length > 14000) break; numbered += line; used = i + 1; }
     const r = await ai.text({
-      json: true, maxTokens: 4096,
-      system: 'Tu es l\'assistant de prise de notes d\'un élève. Tu reçois la transcription automatique brute d\'un extrait d\'un cours de « ' + subject + ' » enregistré en classe, en ' + langName(user) + '.\n' +
-        'Elle contient des erreurs de reconnaissance, des bruits, des bavardages d\'élèves, des remarques d\'organisation ou de discipline.\n' +
-        'Ta tâche : ne garder QUE ce que dit l\'enseignant sur le contenu du cours (explications, définitions, exemples, consignes d\'exercices, dates, formules, noms propres), en conservant AUTANT QUE POSSIBLE ses mots et ses formulations. ' +
-        'Corrige uniquement les mots manifestement mal reconnus, d\'après le contexte. Supprime hésitations, répétitions inutiles et propos hors sujet. N\'ajoute AUCUNE information extérieure. Écris en paragraphes clairs, dans la langue du cours. ' +
-        'Si l\'extrait n\'a aucun contenu de cours exploitable, renvoie une chaîne vide.\nRéponds uniquement en JSON : {"text": "..."}',
-      user: 'Fin de l\'extrait précédent (contexte seulement, ne pas recopier) :\n' + tail + '\n\nTranscription brute à nettoyer :\n' + String(ch ? ch.text : '').slice(0, 12000),
+      json: true, maxTokens: 1500,
+      system: 'Tu aides un élève à garder le cours de « ' + l.subjectName + ' » (' + langName(user) + '). On te donne les phrases NUMÉROTÉES de la transcription automatique d\'un extrait enregistré en classe.\n' +
+        'NE RÉÉCRIS PAS le texte. Réponds seulement avec :\n' +
+        '- "drop" : les numéros des phrases à RETIRER, uniquement si ce n\'est clairement pas le cours : bruit, bavardages d\'élèves, apartés, discipline ou organisation sans lien avec la matière, mots isolés sans sens, transcription incompréhensible.\n' +
+        '- "fix" : pour les rares phrases où un mot a été manifestement mal reconnu, {"n": numéro, "text": la phrase complète corrigée, mots identiques sinon}.\n' +
+        'Toute phrase de l\'enseignant qui parle du cours, même banale ou répétée, doit être GARDÉE. Dans le doute, garde.\n' +
+        'Réponds uniquement en JSON : {"drop":[],"fix":[]}',
+      user: 'Fin de l\'extrait précédent (contexte seulement) :\n' + tail + '\n\nPhrases :\n' + numbered,
     });
-    const text = r.json && typeof r.json.text === 'string' ? r.json.text.trim() : '';
-    await store.set('lnote/' + l.id + '/' + pad4(n), { n, text });
+    const j = r.json || {};
+    const drop = new Set((Array.isArray(j.drop) ? j.drop : []).map(Number).filter((x) => Number.isInteger(x) && x >= 1 && x <= used));
+    const ignoreDrop = used >= 4 && drop.size > 0.7 * used; // une IA qui retire presque tout se trompe : on garde
+    const fixes = {};
+    (Array.isArray(j.fix) ? j.fix : []).forEach((f) => {
+      const k = Number(f && f.n), t = str(f && f.text, 1200);
+      if (!(Number.isInteger(k) && k >= 1 && k <= used && t)) return;
+      const a = words(sents[k - 1]), b = words(t);
+      if (b >= a * 0.7 && b <= a * 1.3 + 2) fixes[k] = t;
+    });
+    const keep = [];
+    sents.forEach((s0, i) => { const k = i + 1; if (!ignoreDrop && drop.has(k)) return; keep.push(fixes[k] || s0); });
+    await store.set('lnote/' + l.id + '/' + pad4(n), { n, text: keep.join(' '), total: sents.length, dropped: ignoreDrop ? 0 : drop.size });
   }
 
   async function stepSections(user, l, gi) {
     const group = l.plan.groups[gi];
-    const notes = [];
-    for (const n of group) { const d = await store.get('lnote/' + l.id + '/' + pad4(n)); if (d && d.text) notes.push(d.text); }
-    const joined = notes.join('\n\n');
-    if (words(joined) < 15) { await store.set('lsec/' + l.id + '/' + pad4(gi), { gi, sections: [] }); return; }
+    const parts = [];
+    for (const n of group) { const d = await store.get('lnote/' + l.id + '/' + pad4(n)); if (d && d.text) parts.push(d.text); }
+    const sents = splitSentences(parts.join(' '));
+    if (words(sents.join(' ')) < 15) { await store.set('lsec/' + l.id + '/' + pad4(gi), { gi, sections: [] }); return; }
     const r = await ai.text({
-      json: true, maxTokens: 8192,
-      system: 'Tu structures les notes d\'un cours de « ' + l.subjectName + ' » (' + langName(user) + '). Le texte fourni est déjà nettoyé : ce sont les propos de l\'enseignant.\n' +
-        'Produis des sections thématiques dans l\'ordre du cours. Pour chaque section : "heading" (titre court) et "content" en Markdown. Le contenu reprend les phrases de l\'enseignant quasiment mot pour mot, organisées avec des listes à puces, **gras** pour les définitions et termes importants, sans résumer à l\'excès : toute notion enseignée doit apparaître. N\'invente rien. ' +
-        '"terms" : 0 à 8 notions ou termes clés de la section.\nRéponds uniquement en JSON : {"sections":[{"heading":"","content":"","terms":[""]}]}',
-      user: joined.slice(0, 26000),
+      json: true, maxTokens: 2500,
+      system: 'Tu découpes en sections un cours de « ' + l.subjectName + ' » (' + langName(user) + '). Les phrases de l\'enseignant sont numérotées, dans l\'ordre.\n' +
+        'NE RÉÉCRIS RIEN et ne résume rien : indique seulement où commence chaque section. Commence une nouvelle section à chaque changement de notion ou de sujet. ' +
+        'Pour chaque section : "heading" (titre court), "start" (numéro de sa première phrase), "terms" (0 à 8 termes clés, notions, définitions ou noms propres, écrits exactement comme dans les phrases).\n' +
+        'La première section commence à 1. Réponds uniquement en JSON : {"sections":[{"heading":"","start":1,"terms":[""]}]}',
+      user: sents.map((x, i) => (i + 1) + '. ' + x).join('\n').slice(0, 40000),
     });
-    let secs = r.json && Array.isArray(r.json.sections) ? r.json.sections : null;
-    if (!secs) throw fail(502, 'Réponse de l\'IA illisible, nouvelle tentative…', { retryAfter: 3 });
-    secs = secs.map((s) => ({
-      heading: str(s && s.heading, 120) || 'Notes', content: str(s && s.content, 12000),
-      terms: (Array.isArray(s && s.terms) ? s.terms : []).map((t) => str(t, 60)).filter(Boolean).slice(0, 8),
-    })).filter((s) => s.content);
+    const plan = r.json && Array.isArray(r.json.sections) ? r.json.sections : [];
+    const starts = new Map();
+    plan.forEach((x) => { const st = Math.round(Number(x && x.start)); if (Number.isInteger(st) && st >= 1 && st <= sents.length && !starts.has(st)) starts.set(st, x); });
+    if (!starts.has(1)) starts.set(1, { heading: plan[0] && plan[0].heading });
+    if (starts.size === 1 && sents.length > 12) { starts.clear(); for (let i = 1; i <= sents.length; i += 8) starts.set(i, { heading: 'Suite du cours' }); } // plan inutilisable : coupes régulières
+    const order = Array.from(starts.keys()).sort((a, b) => a - b);
+    const secs = order.map((st, idx) => {
+      const en = (order[idx + 1] || sents.length + 1) - 1;
+      const meta = starts.get(st) || {};
+      const slice = sents.slice(st - 1, en);
+      const paras = [];
+      for (let i = 0; i < slice.length; i += 4) paras.push(slice.slice(i, i + 4).join(' '));
+      const terms = (Array.isArray(meta.terms) ? meta.terms : []).map((t) => str(t, 60)).filter((t) => t.length >= 3).slice(0, 10);
+      return { heading: str(meta.heading, 120) || 'Suite du cours', content: boldTerms(paras.join('\n\n'), terms), terms };
+    });
     await store.set('lsec/' + l.id + '/' + pad4(gi), { gi, sections: secs });
   }
 
   async function stepFinalize(user, l) {
+    const compact = true;
     const secs = [];
     for (let gi = 0; gi < l.plan.groups.length; gi++) {
       const d = await store.get('lsec/' + l.id + '/' + pad4(gi));
@@ -297,7 +409,8 @@ export function createApi(store, opts = {}) {
       await saveLesson(l); return;
     }
     const course = await getCourse(user.id, l.subjectId);
-    const titles = course.chapters.filter((c) => c.sections.some((s) => s.lessonId !== l.id)).map((c) => c.title);
+    const forced = l.chapterId ? course.chapters.find((c) => c.id === l.chapterId) : null; // chapitre choisi avant d'enregistrer
+    const titles = forced ? [] : course.chapters.filter((c) => c.sections.some((s) => s.lessonId !== l.id)).map((c) => c.title).slice(0, compact ? 50 : 200);
     const r = await ai.text({
       json: true, maxTokens: 4096,
       system: 'Tu termines la fiche d\'un cours de « ' + l.subjectName + ' » (' + langName(user) + '). On te donne les sections numérotées du cours du jour et la liste des chapitres déjà présents dans le cours global de la matière.\n' +
@@ -305,7 +418,7 @@ export function createApi(store, opts = {}) {
         '"assignments" : pour CHAQUE section i, le "chapter" du cours global où la ranger. Réutilise EXACTEMENT le titre d\'un chapitre existant quand la section en relève ; sinon crée un nouveau titre de chapitre court (60 caractères max). Plusieurs sections peuvent aller dans le même chapitre.\n' +
         'Réponds uniquement en JSON : {"title":"","summary":"","keyPoints":[""],"assignments":[{"i":0,"chapter":""}]}',
       user: 'Chapitres existants :\n' + (titles.length ? titles.map((t) => '- ' + t).join('\n') : '(aucun pour le moment)') + '\n\nSections du cours du jour :\n' +
-        secs.map((s, i) => i + '. ' + s.heading + ' : ' + s.content.slice(0, 260).replace(/\s+/g, ' ')).join('\n').slice(0, 20000),
+        secs.map((s, i) => i + '. ' + s.heading + ' : ' + s.content.slice(0, compact ? 100 : 260).replace(/\s+/g, ' ')).join('\n').slice(0, compact ? 8000 : 20000),
     });
     const j = r.json || {};
     const byI = {};
@@ -313,18 +426,21 @@ export function createApi(store, opts = {}) {
     const fallback = str(j.title, 60) || l.title || 'Cours';
     await dropSectionsOf(user.id, l.subjectId, l.id); // si l'étape est rejouée, pas de doublon
     const c2 = await getCourse(user.id, l.subjectId);
+    const target = l.chapterId ? c2.chapters.find((c) => c.id === l.chapterId) : null;
     const used = [];
+    const placed = [];
     secs.forEach((s, i) => {
-      let chap = byI[i] || fallback;
-      const ex = c2.chapters.find((c) => norm(c.title) === norm(chap));
+      let chap = target ? target.title : (byI[i] || fallback);
+      const ex = target || c2.chapters.find((c) => norm(c.title) === norm(chap));
       if (ex) chap = ex.title;
       if (!used.includes(chap)) used.push(chap);
-      addToCourse(c2, chap, { heading: s.heading, content: s.content, terms: s.terms, lessonId: l.id, lessonTitle: l.title, date: l.date });
+      placed.push(chap);
+      addToCourse(c2, chap, { heading: s.heading, content: s.content, terms: s.terms, lessonId: l.id, lessonTitle: l.title, date: l.date }, target ? target.id : undefined);
     });
     await store.set('course/' + user.id + '/' + l.subjectId, c2);
     if (l.autoTitle && str(j.title, 80)) l.title = str(j.title, 80);
     l.recap = { summary: str(j.summary, 3000), keyPoints: (Array.isArray(j.keyPoints) ? j.keyPoints : []).map((k) => str(k, 300)).filter(Boolean).slice(0, 12) };
-    l.sections = secs.map((s, i) => ({ heading: s.heading, content: s.content, terms: s.terms, chapter: used.find((u) => norm(u) === norm(byI[i] || fallback)) || fallback }));
+    l.sections = secs.map((s, i) => ({ heading: s.heading, content: s.content, terms: s.terms, chapter: placed[i] }));
     l.status = 'ready'; l.error = null;
     await saveLesson(l);
   }
@@ -349,15 +465,15 @@ export function createApi(store, opts = {}) {
 
   /* ---------- fiches de révision ---------- */
   const SHEET_SYS = (subject, lang) => 'Tu rédiges des fiches de révision pour un élève, à partir EXCLUSIVEMENT des extraits de cours fournis (cours de « ' + subject + ' », ' + lang + ').\n' +
-    'Règles : reprends les mots, définitions et formulations exacts de l\'enseignant tels qu\'ils figurent dans les extraits (cite-les, ne les reformule pas) ; n\'ajoute aucune information extérieure ; ' +
-    'si une notion demandée n\'apparaît pas dans les extraits, dis-le clairement au lieu de l\'inventer. Réponds en Markdown : titres (##, ###), listes à puces, **gras** pour les termes et définitions à connaître. ' +
-    'Structure conseillée : l\'essentiel en une phrase, définitions à retenir, points clés, exemples du cours, à savoir par cœur. Pas de préambule ni de conclusion.';
+    'Règles : la fiche est un récapitulatif classé par NOTIONS. Pour chaque notion : un titre, puis les phrases EXACTES de l\'enseignant qui la définissent ou l\'expliquent, recopiées mot pour mot (ne les reformule pas, ne les remplace pas par ta version). ' +
+    'Tu peux regrouper et ordonner, mais jamais changer les mots du professeur. N\'ajoute aucune information extérieure. Si une notion demandée n\'apparaît pas dans les extraits, dis-le clairement au lieu de l\'inventer.\n' +
+    'Format Markdown : ## pour une notion, listes à puces pour les points, **gras** pour les termes et définitions à connaître. Termine par « À retenir » : 3 à 6 puces faites de phrases exactes du cours. Pas de préambule ni de conclusion.';
 
   async function buildSheetTodo(user, subject, body) {
     const course = await getCourse(user.id, subject.id);
     if (!course.chapters.length) throw fail(400, 'Cette matière n\'a pas encore de cours enregistré.');
     const scope = ['notion', 'chapter', 'all'].includes(body.scope) ? body.scope : 'notion';
-    const MAX = 22000;
+    const MAX = 8000;
     if (scope === 'notion') {
       const query = str(body.query, 200);
       if (query.length < 2) throw fail(400, 'Indique la notion à réviser.');
@@ -375,7 +491,7 @@ export function createApi(store, opts = {}) {
       const parts = ch.sections.map((s) => ({ chapter: ch.title, heading: s.heading, content: s.content, date: s.date }));
       splitParts(parts, MAX).forEach((p, i, a) => todo.push({ title: ch.title + (a.length > 1 ? ' (' + (i + 1) + '/' + a.length + ')' : ''), src: extractsText(p), ask: 'Fiche de révision sur le chapitre « ' + ch.title + ' ».' }));
     });
-    if (todo.length > 40) throw fail(400, 'Ce cours est trop volumineux pour une seule fiche : demande plutôt une fiche par chapitre.');
+    if (todo.length > (MAX > 10000 ? 40 : 100)) throw fail(400, 'Ce cours est trop volumineux pour une seule fiche : demande plutôt une fiche par chapitre.');
     return { title: 'Fiche : cours complet de ' + subject.name, query: '', todo };
   }
   function splitParts(parts, max) {
@@ -482,13 +598,13 @@ export function createApi(store, opts = {}) {
       }
     }
     const isAudio = m === 'PUT' && /^\/api\/lessons\/l_[a-f0-9]+\/chunks\/\d+$/.test(p);
-    const body = m === 'POST' ? parseBody(req) : {};
+    const body = m === 'POST' ? parseBody(req, p === '/api/prefs' ? 900 * 1024 : MAX_BODY) : {};
     const user = await authUser(req);
 
     if (m === 'GET' && p === '/api/me') {
-      let pending = 0;
-      if (user) pending = (await getInbox(user.id)).items.filter((x) => x.status === 'pending').length;
-      return json(200, { user: user ? pub(user) : null, pending, langs: LANGS });
+      let pending = 0, prefs = null;
+      if (user) { pending = (await getInbox(user.id)).items.filter((x) => x.status === 'pending').length; prefs = await getPrefs(user.id); await touchPresence(user, req); }
+      return json(200, { user: user ? pub(user) : null, pending, prefs, langs: LANGS });
     }
 
     if (m === 'POST' && p === '/api/register') {
@@ -506,6 +622,7 @@ export function createApi(store, opts = {}) {
       }
       const u = { id, pseudo, pseudoLower: low, salt: h.salt, hash: h.hash, joined: todayUtc(), tv: 0, lang: 'fr' };
       await store.set('user/' + id, u);
+      await recordConn(u, req, 'register');
       return json(201, { user: pub(u) }, [await startSession(req, u, !!body.remember)]);
     }
 
@@ -519,12 +636,14 @@ export function createApi(store, opts = {}) {
       const ok = typeof body.password === 'string' && (await checkPw(body.password.slice(0, 200), u));
       if (!ok) { await noteFailure(key); return json(401, { error: 'Pseudo ou mot de passe incorrect.' }); }
       await store.del('rl/' + key);
+      await recordConn(u, req, 'login');
       return json(200, { user: pub(u) }, [await startSession(req, u, !!body.remember)]);
     }
 
     if (m === 'POST' && p === '/api/logout') {
       const t = tokenOf(req);
       if (t) await store.del('sess/' + sha(t));
+      if (user) { const pr = await store.get('presence/' + user.id); if (pr) await store.set('presence/' + user.id, Object.assign({}, pr, { offline: true })); }
       return json(200, { ok: true }, [cookie(req, '', 0)]);
     }
 
@@ -550,14 +669,37 @@ export function createApi(store, opts = {}) {
       if (m === 'GET' && p === '/api/admin/users') {
         const all = (await Promise.all((await store.list('user/')).map((k) => store.get(k)))).filter(Boolean);
         const out = [];
-        for (const u of all) out.push({ id: u.id, pseudo: u.pseudo, pseudoLower: u.pseudoLower, joined: u.joined, lessons: (await getIndex(u.id)).items.length, subjects: (await getSubjects(u.id)).items.length });
+        for (const u of all) {
+          const pr = await store.get('presence/' + u.id), cn = (await store.get('conn/' + u.id)) || { logins: 0, visits: 0 };
+          out.push({ id: u.id, pseudo: u.pseudo, pseudoLower: u.pseudoLower, joined: u.joined, lessons: (await getIndex(u.id)).items.length, subjects: (await getSubjects(u.id)).items.length,
+            online: !!(pr && !pr.offline && Date.now() - pr.lastSeen < 3 * 60000), lastSeen: pr ? pr.lastSeen : 0, logins: cn.logins, visits: cn.visits });
+        }
         out.sort((a, b) => String(a.pseudoLower).localeCompare(String(b.pseudoLower)));
         return json(200, { users: out });
+      }
+      const ac = /^\/api\/admin\/users\/(u_[a-f0-9]+)\/(subjects|lessons|sheets)\/([mlf]_[a-f0-9]+)$/.exec(p);
+      if (ac && m === 'GET') { // lecture seule des cours et fiches d'un compte
+        const tu = await store.get('user/' + ac[1]);
+        if (!tu) return json(404, { error: 'Utilisateur introuvable.' });
+        if (ac[2] === 'subjects') {
+          const sj = (await getSubjects(tu.id)).items.find((x) => x.id === ac[3]);
+          return sj ? json(200, { subject: sj, course: await getCourse(tu.id, sj.id) }) : json(404, { error: 'Matière introuvable.' });
+        }
+        if (ac[2] === 'lessons') {
+          const l = await store.get('lesson/' + ac[3]);
+          if (!l || l.uid !== tu.id) return json(404, { error: 'Cours introuvable.' });
+          const keys = (await store.list('lchunk/' + l.id + '/')).sort();
+          const text = (await Promise.all(keys.map((k) => store.get(k)))).filter(Boolean).map((c) => c.text).filter(Boolean).join('\n\n');
+          return json(200, { lesson: l, transcript: text });
+        }
+        const sh = await store.get('sheet/' + ac[3]);
+        return sh && sh.uid === tu.id ? json(200, { sheet: sh }) : json(404, { error: 'Fiche introuvable.' });
       }
       const am = /^\/api\/admin\/users\/(u_[a-f0-9]+)(?:\/(rename|password))?$/.exec(p);
       if (am) {
         const u = await store.get('user/' + am[1]);
         if (!u) return json(404, { error: 'Utilisateur introuvable.' });
+        if (m === 'GET' && !am[2]) return json(200, await adminDetail(u));
         if (m === 'DELETE' && !am[2]) { await deleteUserData(u); return json(200, { ok: true }); }
         if (m === 'POST' && am[2] === 'rename') {
           const pseudo = typeof body.pseudo === 'string' ? body.pseudo.trim() : '';
@@ -586,7 +728,6 @@ export function createApi(store, opts = {}) {
       /* clés d'IA : ajoutées / retirées sans redéployer */
       if (m === 'GET' && p === '/api/admin/ai') {
         const doc = (await store.get('aikeys')) || { items: [] };
-        doc.items = doc.items.filter((k) => k.provider === 'groq');
         const status = await ai.status();
         const inEnv = (prov) => (((prov === 'groq' ? env.GROQ_API_KEYS || env.GROQ_API_KEY : '') || '').split(/[\s,;]+/).filter(Boolean).length);
         return json(200, {
@@ -639,6 +780,29 @@ export function createApi(store, opts = {}) {
       return json(200, { user: pub(user) });
     }
 
+    /* ----- apparence propre à chaque compte ----- */
+    if (m === 'GET' && p === '/api/prefs/bg') return json(200, (await store.get('prefbg/' + user.id)) || { data: null, v: 0 });
+    if (m === 'POST' && p === '/api/prefs') {
+      const cur = await getPrefs(user.id);
+      const next = Object.assign({}, cur);
+      if (['auto', 'light', 'dark'].includes(body.mode)) next.mode = body.mode;
+      for (const k of ['accent', 'mark', 'bgColor']) if (body[k] !== undefined) next[k] = (body[k] === '' || HEX.test(String(body[k]))) ? body[k] : cur[k];
+      if (['none', 'color', 'image'].includes(body.bgType)) next.bgType = body.bgType;
+      if (body.veil !== undefined) next.veil = Math.max(0, Math.min(90, Math.round(Number(body.veil) || 0)));
+      if (['seyes', 'lines', 'grid', 'plain'].includes(body.paper)) next.paper = body.paper;
+      if (['s', 'm', 'l'].includes(body.size)) next.size = body.size;
+      if (['serif', 'sans'].includes(body.font)) next.font = body.font;
+      if (body.image === null) { await store.del('prefbg/' + user.id); next.bgV = cur.bgV + 1; if (next.bgType === 'image') next.bgType = 'none'; }
+      else if (typeof body.image === 'string') {
+        if (body.image.length > 700000 || !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(body.image)) return json(400, { error: 'Image invalide ou trop lourde.' });
+        next.bgV = cur.bgV + 1; next.bgType = 'image';
+        await store.set('prefbg/' + user.id, { data: body.image, v: next.bgV });
+      }
+      if (next.bgType === 'image' && !(await store.get('prefbg/' + user.id))) next.bgType = 'none';
+      await store.set('prefs/' + user.id, next);
+      return json(200, { prefs: next });
+    }
+
     /* ----- matières ----- */
     if (m === 'GET' && p === '/api/subjects') {
       const subj = await getSubjects(user.id);
@@ -660,7 +824,83 @@ export function createApi(store, opts = {}) {
       await store.set('subj/' + user.id, subj);
       return json(201, { subject: s });
     }
-    let mm = /^\/api\/subjects\/(m_[a-f0-9]+)(?:\/(course|rename))?$/.exec(p);
+    if (m === 'POST' && p === '/api/subjects/order') { // ranger les matières
+      const subj = await getSubjects(user.id);
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+      const byId = new Map(subj.items.map((x) => [x.id, x]));
+      const next = ids.filter((id, i) => byId.has(id) && ids.indexOf(id) === i).map((id) => byId.get(id));
+      subj.items.forEach((x) => { if (!next.includes(x)) next.push(x); });
+      subj.items = next;
+      await store.set('subj/' + user.id, subj);
+      return json(200, { ok: true });
+    }
+
+    /* ----- édition du cours global : chapitres et sections (texte modifiable, déplaçable) ----- */
+    let mm = /^\/api\/subjects\/(m_[a-f0-9]+)\/(chapters|sections)(?:\/([cs]_[a-f0-9]+))?(?:\/(move))?$/.exec(p);
+    if (mm) {
+      const sj = (await getSubjects(user.id)).items.find((x) => x.id === mm[1]);
+      if (!sj) return json(404, { error: 'Matière introuvable.' });
+      const [, , what, id, move] = mm;
+      if (!id && move) return json(404, { error: 'Introuvable.' });
+      const course = await getCourse(user.id, sj.id);
+      const save = () => store.set('course/' + user.id + '/' + sj.id, course);
+      const dir = Number(body.dir) < 0 ? -1 : 1;
+      const swap = (arr, i) => { const j = i + dir; if (j < 0 || j >= arr.length) return false; const t = arr[i]; arr[i] = arr[j]; arr[j] = t; return true; };
+      if (what === 'chapters') {
+        if (m === 'POST' && !id) {
+          const title = str(body.title, 60);
+          if (!title) return json(400, { error: 'Donne un nom au chapitre.' });
+          if (course.chapters.length >= 200) return json(400, { error: 'Maximum 200 chapitres.' });
+          if (course.chapters.some((c) => norm(c.title) === norm(title))) return json(409, { error: 'Ce chapitre existe déjà.' });
+          const ch = { id: 'c_' + rid(4), title, sections: [] };
+          course.chapters.push(ch); await save();
+          return json(201, { chapter: ch });
+        }
+        const i = course.chapters.findIndex((c) => c.id === id);
+        if (i < 0) return json(404, { error: 'Chapitre introuvable.' });
+        const ch = course.chapters[i];
+        if (m === 'POST' && move) { swap(course.chapters, i); await save(); return json(200, { ok: true }); }
+        if (m === 'POST') {
+          const title = str(body.title, 60);
+          if (!title) return json(400, { error: 'Donne un nom au chapitre.' });
+          if (course.chapters.some((c) => c.id !== id && norm(c.title) === norm(title))) return json(409, { error: 'Ce chapitre existe déjà.' });
+          ch.title = title; delete ch.auto; await save();
+          return json(200, { chapter: ch });
+        }
+        if (m === 'DELETE') { course.chapters.splice(i, 1); await save(); return json(200, { ok: true }); }
+      } else {
+        if (m === 'POST' && !id) {
+          const ch = course.chapters.find((c) => c.id === body.chapterId);
+          if (!ch) return json(404, { error: 'Choisis un chapitre.' });
+          const content = str(body.content, 60000);
+          if (!content) return json(400, { error: 'Le texte est vide.' });
+          if (ch.sections.length >= 500) return json(400, { error: 'Maximum 500 sections par chapitre.' });
+          const sec = { id: 's_' + rid(4), heading: str(body.heading, 120) || 'Notes', content, terms: [], lessonId: null, lessonTitle: null, date: ctoday(req, body), manual: true };
+          ch.sections.push(sec); delete ch.auto; await save();
+          return json(201, { section: sec });
+        }
+        let ci = -1, si = -1;
+        course.chapters.forEach((c, x) => { const y = c.sections.findIndex((q) => q.id === id); if (y >= 0) { ci = x; si = y; } });
+        if (ci < 0) return json(404, { error: 'Section introuvable.' });
+        const from = course.chapters[ci], sec = from.sections[si];
+        if (m === 'POST' && move) { swap(from.sections, si); await save(); return json(200, { ok: true }); }
+        if (m === 'POST') {
+          if (body.heading !== undefined) sec.heading = str(body.heading, 120) || 'Notes';
+          if (body.content !== undefined) { const c = str(body.content, 60000); if (!c) return json(400, { error: 'Le texte est vide.' }); sec.content = c; }
+          sec.edited = true;
+          if (body.chapterId && body.chapterId !== from.id) {
+            const to = course.chapters.find((c) => c.id === body.chapterId);
+            if (!to) return json(404, { error: 'Chapitre introuvable.' });
+            from.sections.splice(si, 1); to.sections.push(sec); delete to.auto;
+          }
+          await save();
+          return json(200, { section: sec });
+        }
+        if (m === 'DELETE') { from.sections.splice(si, 1); await save(); return json(200, { ok: true }); }
+      }
+    }
+
+    mm = /^\/api\/subjects\/(m_[a-f0-9]+)(?:\/(course|rename))?$/.exec(p);
     if (mm) {
       const subj = await getSubjects(user.id);
       const s = subj.items.find((x) => x.id === mm[1]);
@@ -673,6 +913,10 @@ export function createApi(store, opts = {}) {
         s.name = name;
         if (/^#[0-9a-f]{6}$/i.test(body.color || '')) s.color = body.color;
         await store.set('subj/' + user.id, subj);
+        for (const x of (await getIndex(user.id)).items.filter((l) => l.subjectId === s.id)) { const l = await store.get('lesson/' + x.id); if (l && l.subjectName !== name) { l.subjectName = name; await store.set('lesson/' + l.id, l); } }
+        const sidx = await getSheetsIdx(user.id);
+        for (const x of sidx.items.filter((f) => f.subjectId === s.id)) { x.subjectName = name; const f = await store.get('sheet/' + x.id); if (f) { f.subjectName = name; await store.set('sheet/' + f.id, f); } }
+        await store.set('usheets/' + user.id, sidx);
         return json(200, { subject: s });
       }
       if (m === 'DELETE' && !mm[2]) {
@@ -695,7 +939,7 @@ export function createApi(store, opts = {}) {
       const date = ctoday(req, body);
       const l = {
         id: 'l_' + rid(8), uid: user.id, subjectId: s.id, subjectName: s.name, title: title || s.name + ' — ' + date.split('-').reverse().join('/'),
-        autoTitle: !title, date, status: 'recording', durationSec: 0, createdAt: Date.now(), recap: null, sections: [],
+        autoTitle: !title, chapterId: /^c_[a-f0-9]+$/.test(body.chapterId || '') ? body.chapterId : null, date, status: 'recording', durationSec: 0, createdAt: Date.now(), recap: null, sections: [],
       };
       await saveLesson(l);
       return json(201, { lesson: l });
@@ -755,10 +999,11 @@ export function createApi(store, opts = {}) {
           return json(200, { ok: true, lesson: l });
         }
         const groups = [];
+        const maxWords = 1100; // petits morceaux pour tenir dans les quotas de Groq
         let cur = [], w = 0;
         withText.forEach((d) => {
           const dw = words(d.text);
-          if (cur.length && w + dw > 2500) { groups.push(cur); cur = []; w = 0; }
+          if (cur.length && w + dw > maxWords) { groups.push(cur); cur = []; w = 0; }
           cur.push(d.n); w += dw;
         });
         if (cur.length) groups.push(cur);
@@ -789,12 +1034,20 @@ export function createApi(store, opts = {}) {
       await store.set('sheet/' + sh.id, sh);
       return json(201, { id: sh.id, total: sh.todo.length });
     }
-    mm = /^\/api\/sheets\/(f_[a-f0-9]+)(?:\/(step|rename))?$/.exec(p);
+    mm = /^\/api\/sheets\/(f_[a-f0-9]+)(?:\/(step|rename|edit))?$/.exec(p);
     if (mm) {
       const sh = await ownSheet(user, mm[1]);
       if (m === 'GET' && !mm[2]) { const { todo, ...rest } = sh; return json(200, { sheet: Object.assign(rest, { progress: { done: todo.filter((t) => t.done).length, total: todo.length } }) }); }
       if (m === 'DELETE' && !mm[2]) { await deleteSheet(sh); return json(200, { ok: true }); }
       if (m === 'POST' && mm[2] === 'step') return json(200, await sheetStep(user, sh));
+      if (m === 'POST' && mm[2] === 'edit') {
+        if (sh.status !== 'ready') return json(400, { error: 'La fiche n\'est pas terminée.' });
+        const c = str(body.content, 200000);
+        if (!c) return json(400, { error: 'Le texte est vide.' });
+        sh.content = c; sh.edited = true;
+        await store.set('sheet/' + sh.id, sh);
+        return json(200, { ok: true });
+      }
       if (m === 'POST' && mm[2] === 'rename') {
         const t = str(body.title, 120);
         if (!t) return json(400, { error: 'Le titre ne peut pas être vide.' });
