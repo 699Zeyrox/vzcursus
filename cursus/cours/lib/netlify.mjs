@@ -1,6 +1,7 @@
 /* Adaptateur entre une fonction Netlify (API Request / Response) et le noyau de l'API. */
+/* Adaptateur entre une fonction Netlify (API Request / Response) et le noyau de l'API. */
 export function asNetlifyHandler(handle) {
-  return async (req) => {
+  return async (req, context) => {
     const url = new URL(req.url);
     const ctype = req.headers.get('content-type') || '';
     const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
@@ -18,6 +19,7 @@ export function asNetlifyHandler(handle) {
       bytes,
       host: url.host,
       ip,
+      geo: context && context.geo ? { city: context.geo.city, region: context.geo.subdivision && context.geo.subdivision.name, country: context.geo.country && (context.geo.country.name || context.geo.country.code) } : null,
       secure: url.protocol === 'https:',
     });
     const headers = new Headers({
