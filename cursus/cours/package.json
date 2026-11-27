@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Enregistre tes cours, les nettoie, les classe par matière et génère des fiches de révision.",
-  "scripts": { "start": "node server.mjs", "dev": "netlify dev", "test": "node test/run.mjs" },
+  "scripts": { "start": "node server.mjs", "dev": "netlify dev", "test": "node test/run.mjs && node test/groq-only.mjs && node test/features.mjs" },
   "engines": { "node": ">=18" },
   "dependencies": { "@netlify/blobs": "^8.1.0" }
 }
