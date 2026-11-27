@@ -9,39 +9,7 @@ import { fileStorage } from '../lib/storage-file.mjs';
 let passed = 0;
 const t = async (name, fn) => { try { await fn(); passed++; console.log('  ok  ' + name); } catch (e) { console.error('  ECHEC ' + name + '\n', e); process.exitCode = 1; } };
 
-/* ----- IA simulée (Groq) ----- */
-const calls = { groqStt: [], groqChat: 0 };
-let quotaOnKey = null;       // clé Groq qui répond 429
-function fakeFetch(url, init) {
-  const u = String(url);
-  const hdr = init.headers || {};
-  const resp = (status, body, headers) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: Object.assign({ 'content-type': 'application/json' }, headers || {}) }));
-  if (u.includes('api.groq.com/openai/v1/audio/transcriptions')) {
-    const key = String(hdr.authorization || '').replace('Bearer ', '');
-    calls.groqStt.push(key);
-    if (key === quotaOnKey) return resp(429, { error: { message: 'Rate limit reached for audio seconds per day' } }, { 'retry-after': '3600' });
-    return resp(200, { text: 'x', duration: 120, segments: [
-      { text: ' La photosynthèse est la transformation de l\'énergie lumineuse en énergie chimique.', avg_logprob: -0.2, no_speech_prob: 0.01, compression_ratio: 1.4 },
-      { text: ' Sous-titrage ST\' 501', avg_logprob: -0.3, no_speech_prob: 0.1, compression_ratio: 1.0 },
-      { text: ' bruit de chaise', avg_logprob: -1.8, no_speech_prob: 0.9, compression_ratio: 1.0 },
-      { text: ' Elle a lieu dans les chloroplastes, grâce à la chlorophylle, et produit du glucose et du dioxygène.', avg_logprob: -0.25, no_speech_prob: 0.02, compression_ratio: 1.5 },
-    ] });
-  }
-  if (u.includes('api.groq.com/openai/v1/chat/completions')) {
-    calls.groqChat++;
-    const body = JSON.parse(init.body);
-    const sys = body.messages[0].content;
-    const reply = (text) => resp(200, { choices: [{ message: { role: 'assistant', content: text } }] });
-    let out;
-    if (sys.includes('prise de notes')) out = { text: 'La photosynthèse est la transformation de l\'énergie lumineuse en énergie chimique. Elle a lieu dans les chloroplastes, grâce à la chlorophylle, et produit du glucose et du dioxygène.' };
-    else if (sys.includes('structures')) out = { sections: [{ heading: 'Définition', content: '- **Photosynthèse** : transformation de l\'énergie lumineuse en énergie chimique.\n- Lieu : les chloroplastes.', terms: ['photosynthèse', 'chloroplaste'] }] };
-    else if (sys.includes('termines')) out = { title: 'La photosynthèse', summary: 'Le professeur définit la photosynthèse.', keyPoints: ['Définition', 'Chloroplastes'], assignments: [{ i: 0, chapter: 'La photosynthèse' }] };
-    else if (sys.includes('fiches de révision')) return reply('## Photosynthèse\n- **Définition** : « transformation de l\'énergie lumineuse en énergie chimique ».');
-    else out = { ok: true };
-    return reply(JSON.stringify(out));
-  }
-  return resp(404, {});
-}
+import { fakeFetch, calls, ctl } from './fake-ai.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cours-'));
 const env = { GROQ_API_KEYS: 'gsk_AAAAAAAAAAAAAAAAAAAAAAAA, gsk_BBBBBBBBBBBBBBBBBBBBBBBB', ADMIN_PASSWORD: 'MotDePasseDeTest!' };
@@ -159,56 +127,26 @@ await t('un autre utilisateur ne voit pas mes cours', async () => {
 
 console.log('Clés d\'IA : quota dépassé, rotation, renouvellement');
 await t('une clé Groq en quota est mise en pause, la suivante prend le relais', async () => {
-  quotaOnKey = 'gsk_AAAAAAAAAAAAAAAAAAAAAAAA';
+  ctl.quotaOnKey = 'gsk_AAAAAAAAAAAAAAAAAAAAAAAA';
   const l = (await A.post('/api/lessons', { subjectId: subj.id })).body.lesson;
   let n = 0;
   const paused = async () => (await ADM.get('/api/admin/ai')).body.status.groq.filter((k) => k.cooling.length).length;
   while (!(await paused()) && n < 40) { assert.equal((await A.put('/api/lessons/' + l.id + '/chunks/' + n, audio)).status, 200); n++; } // jamais d'échec visible : on bascule sur la clé B
   assert.equal(await paused(), 1, 'la clé en quota doit apparaître en pause');
-  const before = calls.groqStt.filter((k) => k === quotaOnKey).length;
+  const before = calls.groqStt.filter((k) => k === ctl.quotaOnKey).length;
   for (let i = 0; i < 6; i++) assert.equal((await A.put('/api/lessons/' + l.id + '/chunks/' + (n + i), audio)).status, 200);
-  assert.equal(calls.groqStt.filter((k) => k === quotaOnKey).length, before, 'la clé en pause n\'est plus appelée');
+  assert.equal(calls.groqStt.filter((k) => k === ctl.quotaOnKey).length, before, 'la clé en pause n\'est plus appelée');
   await A.del('/api/lessons/' + l.id);
 });
 await t('la pause expire toute seule puis la clé est réutilisée', async () => {
   for (const k of await store.list('aicool/')) { const v = await store.get(k); v.until = Date.now() - 1000; await store.set(k, v); }
-  quotaOnKey = null;
+  ctl.quotaOnKey = null;
   const l = (await A.post('/api/lessons', { subjectId: subj.id })).body.lesson;
   const before = calls.groqStt.length;
   for (let i = 0; i < 12; i++) await A.put('/api/lessons/' + l.id + '/chunks/' + i, audio);
   const used = new Set(calls.groqStt.slice(before));
   assert.equal(used.size, 2, 'les deux clés servent de nouveau');
   await A.del('/api/lessons/' + l.id);
-});
-await t('Whisper turbo en pause sur toutes les clés : bascule sur Whisper large v3', async () => {
-  for (const k of await store.list('aicool/')) await store.del(k);
-  const models = [];
-  const noTurbo = (u, i) => {
-    if (String(u).includes('audio/transcriptions')) { const m = i.body.get('model'); models.push(m); if (m === 'whisper-large-v3-turbo') return Promise.resolve(new Response('{"error":{"message":"limite"}}', { status: 429, headers: { 'retry-after': '120' } })); }
-    return fakeFetch(u, i);
-  };
-  H = createApi(store, { env, fetch: noTurbo });
-  const l = (await A.post('/api/lessons', { subjectId: subj.id })).body.lesson;
-  const r = await A.put('/api/lessons/' + l.id + '/chunks/0', audio);
-  assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.ok(models.includes('whisper-large-v3'), 'Whisper large v3 a pris le relais');
-  H = handle;
-  for (const k of await store.list('aicool/')) await store.del(k);
-  await A.del('/api/lessons/' + l.id);
-});
-await t('texte : un modèle Groq en pause, le suivant prend le relais', async () => {
-  for (const k of await store.list('aicool/')) await store.del(k);
-  const used = [];
-  const no120 = (u, i) => {
-    if (String(u).includes('chat/completions')) { const m = JSON.parse(i.body).model; used.push(m); if (m === 'openai/gpt-oss-120b') return Promise.resolve(new Response('{"error":{"message":"limite"}}', { status: 429, headers: { 'retry-after': '60' } })); }
-    return fakeFetch(u, i);
-  };
-  H = createApi(store, { env, fetch: no120 });
-  const test = (await ADM.post('/api/admin/ai/test')).body;
-  assert.equal(test.ok, true, JSON.stringify(test));
-  assert.notEqual(test.model, 'openai/gpt-oss-120b');
-  H = handle;
-  for (const k of await store.list('aicool/')) await store.del(k);
 });
 await t('quota partout : 503 + retryAfter, puis tout reprend quand le quota se renouvelle', async () => {
   for (const k of await store.list('aicool/')) await store.del(k);
